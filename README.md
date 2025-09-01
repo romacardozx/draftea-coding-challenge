@@ -11,6 +11,18 @@ Sistema distribuido de procesamiento de pagos construido con arquitectura server
 5. [Plan de Escalabilidad](#-plan-de-escalabilidad)
 6. [Debilidades y Arquitecturas Alternativas](#-debilidades-y-arquitecturas-alternativas)
 
+## 🚀 Quick Start
+
+```bash
+# Clonar e iniciar el sistema completo
+git clone <repository-url>
+cd draftea-coding-challenge
+make full-setup  # Configura todo automáticamente
+
+# Probar el flujo de pagos
+make test-payment  # Ejecuta un pago de prueba con monitor visual
+```
+
 ## 🏗️ Arquitectura y Estructura del Proyecto
 
 ### Arquitectura General
@@ -290,28 +302,54 @@ type PaymentEvent struct {
 - Make
 - jq (para scripts de prueba)
 
-### Configuración Local
+### Instalación y Configuración Local
+
+#### Opción 1: Setup Automático (Recomendado) ✨
 
 ```bash
 # 1. Clonar el repositorio
-git clone https://github.com/romancardozo/draftea-coding-challenge.git
+git clone <repository-url>
 cd draftea-coding-challenge
 
-# 2. Configurar permisos de scripts (IMPORTANTE para nuevos usuarios)
-make setup
-
-# 3. Construir todos los servicios
-make build-all
-
-# 4. Iniciar el entorno local
-make start-local
+# 2. Setup completo automático
+make full-setup
 ```
 
-Esto iniciará:
+El comando `make full-setup` ejecuta automáticamente:
+1. Levanta servicios Docker (LocalStack, Mock Gateway)
+2. Inicializa dependencias Go
+3. Compila todas las funciones Lambda
+4. Despliega las funciones en LocalStack
+5. Crea el Step Functions state machine
 
-- DynamoDB Local en puerto 8000
-- Mock Payment Gateway en puerto 3000
-- SAM Local API en puerto 3001
+#### Opción 2: Setup Manual (Para desarrollo)
+
+```bash
+# Levantar servicios Docker
+make docker-up
+
+# Compilar funciones Lambda
+make build-all
+
+# Desplegar en LocalStack
+make deploy-lambdas
+
+# Crear Step Function
+make create-state-machine
+```
+
+#### Servicios Iniciados
+
+- **LocalStack**: Puerto 4566 (servicios AWS)
+- **Mock Payment Gateway**: Puerto 3000
+- **DynamoDB**: Dentro de LocalStack
+
+#### Reiniciar Todo
+
+```bash
+# Si necesitas reiniciar desde cero
+make restart-all
+```
 
 ### Ejecutar Pruebas
 
@@ -384,8 +422,6 @@ make test-payment-fail
 # Test con montos personalizados
 make test-payment-custom USER_ID=user_test_001 AMOUNT=100 CURRENCY=USD ORDER_ID=my_order
 
-# Suite completa de tests E2E
-make test-e2e
 ```
 
 #### Test de API Manual
@@ -404,20 +440,16 @@ make test-payment-large   # 500 USD
 make test-payment-fail    # 5000 USD (fallará por fondos insuficientes)
 ```
 
-#### Test de Resiliencia
-```bash
-# Simular fallo del gateway (el Circuit Breaker se activará)
-make test-circuit-breaker
-```
-
 ### 📚 Referencia Completa de Comandos Make
 
 #### Comandos de Configuración
 
 | Comando | Descripción | Cuándo usar |
 |---------|-------------|-------------|
-| `make setup` | Configura permisos ejecutables en todos los scripts | Siempre al clonar el repo |
-| `make init` | Inicializa el entorno completo (setup + build + deploy) | Primera vez |
+| `make full-setup` | Setup completo: Docker + build + deploy + state machine | Primera instalación |
+| `make restart-all` | Reinicia todo desde cero (limpia y reconstruye) | Resetear entorno |
+| `make setup` | Configura permisos ejecutables en todos los scripts | Después de clonar |
+| `make init` | Inicializa el entorno (dependencias y configuración) | Primera vez |
 | `make build-all` | Compila todas las funciones Lambda | Después de cambios en código |
 | `make build-lambda NAME=xxx` | Compila una Lambda específica | Desarrollo de función individual |
 
@@ -425,12 +457,14 @@ make test-circuit-breaker
 
 | Comando | Descripción | Puerto/Servicio |
 |---------|-------------|----------------|
-| `make start-local` | Inicia todos los servicios locales | DynamoDB:8000, Gateway:3000, API:3001 |
+| `make docker-up` | Inicia LocalStack y Mock Gateway en Docker | LocalStack:4566, Gateway:3000 |
+| `make docker-down` | Detiene todos los servicios Docker | - |
 | `make start-localstack` | Solo LocalStack con servicios AWS | LocalStack:4566 |
 | `make start-gateway` | Solo mock payment gateway | Gateway:3000 |
-| `make deploy-local` | Despliega Lambdas en SAM local | API:3001 |
-| `make deploy-stepfunction` | Despliega Step Function | LocalStack:4566 |
-| `make create-tables` | Crea tablas en DynamoDB | DynamoDB:8000 |
+| `make deploy-lambdas` | Despliega todas las Lambdas en LocalStack | LocalStack:4566 |
+| `make create-state-machine` | Crea el Step Functions state machine | LocalStack:4566 |
+| `make update-state-machine` | Actualiza el Step Functions state machine | LocalStack:4566 |
+| `make create-tables` | Crea tablas en DynamoDB | LocalStack:4566 |
 
 #### Comandos de Testing con Monitor Visual
 
@@ -452,7 +486,7 @@ make test-circuit-breaker
 | `make test-check-wallet-balance` | Consulta saldo de wallet | Verificación manual |
 | `make test-curl-wallet-credit` | Acredita wallet vía curl | Preparar pruebas |
 | `make clean` | Limpia archivos generados | Antes de rebuild |
-| `make stop-all` | Detiene todos los servicios | Al finalizar desarrollo |
+| `make docker-down` | Detiene todos los servicios Docker | Al finalizar desarrollo |
 
 #### Comandos de Debug y Desarrollo
 
@@ -468,10 +502,14 @@ make test-circuit-breaker
 #### Flujo de Testing Recomendado
 
 ```bash
-# 1. Preparación inicial
-make setup              # Configura permisos
+# 1. Preparación inicial (opción rápida)
+make full-setup         # Todo automático: Docker + build + deploy
+
+# O paso a paso:
+make docker-up          # Inicia servicios Docker
 make build-all          # Compila todo
-make start-local        # Inicia servicios
+make deploy-lambdas     # Despliega funciones
+make create-state-machine # Crea Step Function
 
 # 2. Verificación de infraestructura
 make test-curl-wallet-credit    # Acredita wallet inicial
@@ -483,11 +521,6 @@ make test-payment               # Test con 50 USD
 make test-payment-large         # Test con 500 USD
 make test-payment-fail          # Test de fallo (5000 USD)
 
-# 4. Pruebas de resiliencia
-make test-circuit-breaker       # Test de Circuit Breaker
-
-# 5. Suite completa
-make test-e2e                   # Ejecuta todos los tests
 ```
 
 #### Personalización de Tests

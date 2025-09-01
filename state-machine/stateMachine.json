@@ -274,8 +274,8 @@
     },
     "PaymentFailed": {
       "Type": "Fail",
-      "Error": "PaymentProcessingFailed",
-      "Cause": "Payment could not be processed successfully"
+      "Error": "PaymentProcessingError",
+      "Cause": "Payment processing failed. Check the error details in the execution output."
     }
   }
 }

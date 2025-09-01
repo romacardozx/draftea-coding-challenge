@@ -111,6 +111,52 @@ gateway-background: ## Start gateway in background
 .PHONY: all
 all: clean setup deploy ## Build and deploy everything
 
+.PHONY: deploy-lambdas
+deploy-lambdas: build ## Deploy Lambda functions to LocalStack
+	@echo "🚀 Deploying Lambda functions..."
+	@./scripts/deploy-lambdas.sh
+	@echo "✅ Lambda deployment completed"
+
+.PHONY: create-state-machine
+create-state-machine: ## Create Step Functions state machine
+	@echo "📊 Creating Step Functions state machine..."
+	@AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test aws stepfunctions create-state-machine \
+		--name PaymentProcessingStateMachine \
+		--definition file://state-machine/stateMachine.json \
+		--role-arn arn:aws:iam::000000000000:role/stepfunctions-role \
+		--endpoint-url http://localhost:4566 \
+		--region us-east-1 2>/dev/null && echo "✅ State machine created" || echo "⚠️  State machine already exists"
+
+.PHONY: update-state-machine
+update-state-machine: ## Update Step Functions state machine
+	@echo "🔄 Updating Step Functions state machine..."
+	@AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test aws stepfunctions update-state-machine \
+		--state-machine-arn arn:aws:states:us-east-1:000000000000:stateMachine:PaymentProcessingStateMachine \
+		--definition file://state-machine/stateMachine.json \
+		--endpoint-url http://localhost:4566 \
+		--region us-east-1 && echo "✅ State machine updated" || echo "❌ Failed to update state machine"
+
+.PHONY: full-setup
+full-setup: ## Complete setup: Docker, build, deploy everything
+	@echo "🎯 Starting complete setup..."
+	@$(MAKE) docker-up
+	@sleep 5
+	@$(MAKE) init
+	@$(MAKE) build
+	@./scripts/create-tables.sh
+	@$(MAKE) deploy-lambdas
+	@$(MAKE) create-state-machine
+	@echo "✅ Full setup completed! System ready for testing."
+
+.PHONY: restart-all
+restart-all: ## Restart everything from scratch
+	@echo "🔄 Restarting all services..."
+	@$(MAKE) clean
+	@$(MAKE) docker-down
+	@sleep 2
+	@$(MAKE) full-setup
+	@echo "✅ All services restarted successfully!"
+
 .PHONY: deploy-local
 deploy-local: build ## Deploy to local environment with SAM
 	@echo "🚀 Deploying with SAM local..."
