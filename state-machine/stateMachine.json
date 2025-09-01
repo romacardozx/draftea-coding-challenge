@@ -1,0 +1,281 @@
+{
+  "Comment": "Payment Processing State Machine",
+  "StartAt": "CreateInvoice",
+  "States": {
+    "CreateInvoice": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "invoice-processor",
+        "Payload": {
+          "action": "create_payment",
+          "userId.$": "$.userId",
+          "amount.$": "$.amount",
+          "currency.$": "$.currency",
+          "metadata.$": "$.metadata"
+        }
+      },
+      "ResultPath": "$.invoiceResult",
+      "Next": "CheckWalletBalance",
+      "Retry": [
+        {
+          "ErrorEquals": ["States.TaskFailed"],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 3,
+          "BackoffRate": 2
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "Next": "PaymentFailed",
+          "ResultPath": "$.error"
+        }
+      ]
+    },
+    "CheckWalletBalance": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "wallet-service",
+        "Payload": {
+          "action": "check_balance",
+          "userId.$": "$.userId",
+          "amount.$": "$.amount"
+        }
+      },
+      "ResultPath": "$.walletCheck",
+      "Next": "HasSufficientBalance",
+      "Retry": [
+        {
+          "ErrorEquals": ["States.TaskFailed"],
+          "IntervalSeconds": 1,
+          "MaxAttempts": 2,
+          "BackoffRate": 2
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "Next": "PaymentFailed",
+          "ResultPath": "$.error"
+        }
+      ]
+    },
+    "HasSufficientBalance": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.walletCheck.Payload.success",
+          "BooleanEquals": true,
+          "Next": "DebitWallet"
+        }
+      ],
+      "Default": "InsufficientBalance"
+    },
+    "InsufficientBalance": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "invoice-processor",
+        "Payload": {
+          "action": "update_status",
+          "paymentId.$": "$.invoiceResult.Payload.data.id",
+          "status": "failed",
+          "reason": "insufficient_balance"
+        }
+      },
+      "ResultPath": "$.updateResult",
+      "Next": "PaymentFailed"
+    },
+    "DebitWallet": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "wallet-service",
+        "Payload": {
+          "action": "debit",
+          "userId.$": "$.userId",
+          "amount.$": "$.amount",
+          "paymentId.$": "$.invoiceResult.Payload.data.id"
+        }
+      },
+      "ResultPath": "$.walletDebit",
+      "Next": "ProcessPayment",
+      "Retry": [
+        {
+          "ErrorEquals": ["States.TaskFailed"],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 3,
+          "BackoffRate": 2
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "Next": "PaymentFailed",
+          "ResultPath": "$.error"
+        }
+      ]
+    },
+    "ProcessPayment": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "payments-adapter",
+        "Payload": {
+          "action": "process_payment",
+          "paymentId.$": "$.invoiceResult.Payload.data.id",
+          "userId.$": "$.userId",
+          "amount.$": "$.amount",
+          "currency.$": "$.currency",
+          "metadata.$": "$.metadata"
+        }
+      },
+      "ResultPath": "$.paymentResult",
+      "Next": "CheckPaymentStatus",
+      "Retry": [
+        {
+          "ErrorEquals": ["States.TaskFailed"],
+          "IntervalSeconds": 5,
+          "MaxAttempts": 3,
+          "BackoffRate": 2
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "Next": "RefundWallet",
+          "ResultPath": "$.error"
+        }
+      ]
+    },
+    "CheckPaymentStatus": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.paymentResult.Payload.success",
+          "BooleanEquals": true,
+          "Next": "UpdatePaymentSuccess"
+        },
+        {
+          "Variable": "$.paymentResult.Payload.data.status",
+          "StringEquals": "pending",
+          "Next": "WaitForPaymentConfirmation"
+        }
+      ],
+      "Default": "RefundWallet"
+    },
+    "WaitForPaymentConfirmation": {
+      "Type": "Wait",
+      "Seconds": 10,
+      "Next": "CheckPaymentStatusAgain"
+    },
+    "CheckPaymentStatusAgain": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "payments-adapter",
+        "Payload": {
+          "action": "check_status",
+          "externalId.$": "$.paymentResult.Payload.data.externalId"
+        }
+      },
+      "ResultPath": "$.statusCheck",
+      "Next": "EvaluatePaymentStatus",
+      "Retry": [
+        {
+          "ErrorEquals": ["States.TaskFailed"],
+          "IntervalSeconds": 3,
+          "MaxAttempts": 3,
+          "BackoffRate": 2
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "Next": "RefundWallet",
+          "ResultPath": "$.error"
+        }
+      ]
+    },
+    "EvaluatePaymentStatus": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.statusCheck.Payload.data.status",
+          "StringEquals": "approved",
+          "Next": "UpdatePaymentSuccess"
+        },
+        {
+          "Variable": "$.statusCheck.Payload.data.status",
+          "StringEquals": "pending",
+          "Next": "WaitForPaymentConfirmation"
+        }
+      ],
+      "Default": "RefundWallet"
+    },
+    "UpdatePaymentSuccess": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "invoice-processor",
+        "Payload": {
+          "action": "update_payment",
+          "paymentId.$": "$.invoiceResult.Payload.data.id",
+          "status": "completed",
+          "externalId.$": "$.paymentResult.Payload.data.externalId"
+        }
+      },
+      "ResultPath": "$.finalUpdate",
+      "Next": "PaymentSuccess"
+    },
+    "RefundWallet": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "wallet-service",
+        "Payload": {
+          "action": "credit",
+          "userId.$": "$.userId",
+          "amount.$": "$.amount",
+          "paymentId.$": "$.invoiceResult.Payload.data.id",
+          "reason": "payment_failed"
+        }
+      },
+      "ResultPath": "$.refundResult",
+      "Next": "UpdatePaymentFailed",
+      "Retry": [
+        {
+          "ErrorEquals": ["States.TaskFailed"],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 5,
+          "BackoffRate": 2
+        }
+      ]
+    },
+    "UpdatePaymentFailed": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "invoice-processor",
+        "Payload": {
+          "action": "update_payment",
+          "paymentId.$": "$.invoiceResult.Payload.data.id",
+          "status": "failed",
+          "error.$": "$.error"
+        }
+      },
+      "ResultPath": "$.failureUpdate",
+      "Next": "PaymentFailed"
+    },
+    "PaymentSuccess": {
+      "Type": "Succeed"
+    },
+    "PaymentFailed": {
+      "Type": "Fail",
+      "Error": "PaymentProcessingFailed",
+      "Cause": "Payment could not be processed successfully"
+    }
+  }
+}

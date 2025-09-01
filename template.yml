@@ -1,0 +1,247 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Payment Saga System - Serverless Architecture
+
+Globals:
+  Function:
+    Runtime: go1.x
+    Timeout: 30
+    MemorySize: 512
+    Environment:
+      Variables:
+        DYNAMODB_ENDPOINT: !If [IsLocal, "http://host.docker.internal:8000", ""]
+        IS_LOCAL: !If [IsLocal, "true", "false"]
+        STAGE: !Ref Stage
+    Tracing: Active
+
+Parameters:
+  Stage:
+    Type: String
+    Default: local
+    AllowedValues:
+      - local
+      - dev
+      - prod
+
+Conditions:
+  IsLocal: !Equals [!Ref Stage, "local"]
+
+Resources:
+  # DynamoDB Tables
+  WalletsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub ${Stage}-Wallets
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: userId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: userId
+          KeyType: HASH
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
+
+  PaymentEventsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub ${Stage}-PaymentEvents
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: paymentId
+          AttributeType: S
+        - AttributeName: timestamp
+          AttributeType: S
+        - AttributeName: userId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: paymentId
+          KeyType: HASH
+        - AttributeName: timestamp
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: UserIndex
+          KeySchema:
+            - AttributeName: userId
+              KeyType: HASH
+            - AttributeName: timestamp
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+
+  CircuitBreakerTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub ${Stage}-CircuitBreaker
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: serviceName
+          AttributeType: S
+      KeySchema:
+        - AttributeName: serviceName
+          KeyType: HASH
+      TimeToLiveSpecification:
+        Enabled: true
+        AttributeName: resetTime
+
+  IdempotencyTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub ${Stage}-Idempotency
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: idempotencyKey
+          AttributeType: S
+      KeySchema:
+        - AttributeName: idempotencyKey
+          KeyType: HASH
+      TimeToLiveSpecification:
+        Enabled: true
+        AttributeName: expirationTime
+
+  # Lambda Functions
+  InvoiceProcessorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${Stage}-invoice-processor
+      CodeUri: lambdas/invoice-processor/
+      Handler: bootstrap
+      Environment:
+        Variables:
+          WALLETS_TABLE: !Ref WalletsTable
+          EVENTS_TABLE: !Ref PaymentEventsTable
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref WalletsTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref PaymentEventsTable
+
+  WalletServiceFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${Stage}-wallet-service
+      CodeUri: lambdas/wallet-service/
+      Handler: bootstrap
+      Environment:
+        Variables:
+          WALLETS_TABLE: !Ref WalletsTable
+          EVENTS_TABLE: !Ref PaymentEventsTable
+          IDEMPOTENCY_TABLE: !Ref IdempotencyTable
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref WalletsTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref PaymentEventsTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref IdempotencyTable
+
+  PaymentsAdapterFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${Stage}-payments-adapter
+      CodeUri: lambdas/payments-adapter/
+      Handler: bootstrap
+      Environment:
+        Variables:
+          CIRCUIT_BREAKER_TABLE: !Ref CircuitBreakerTable
+          EVENTS_TABLE: !Ref PaymentEventsTable
+          GATEWAY_URL: !If [IsLocal, "http://host.docker.internal:8081", "https://payment-gateway.example.com"]
+          FAILURE_THRESHOLD: "5"
+          SUCCESS_THRESHOLD: "3"
+          TIMEOUT_SECONDS: "30"
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref CircuitBreakerTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref PaymentEventsTable
+
+  RefundServiceFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${Stage}-refund-service
+      CodeUri: lambdas/refund-service/
+      Handler: bootstrap
+      Environment:
+        Variables:
+          WALLETS_TABLE: !Ref WalletsTable
+          EVENTS_TABLE: !Ref PaymentEventsTable
+          IDEMPOTENCY_TABLE: !Ref IdempotencyTable
+          GATEWAY_URL: !If [IsLocal, "http://host.docker.internal:8081", "https://payment-gateway.example.com"]
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref WalletsTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref PaymentEventsTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref IdempotencyTable
+
+  # Step Functions State Machine
+  PaymentSagaStateMachine:
+    Type: AWS::Serverless::StateMachine
+    Properties:
+      Name: !Sub ${Stage}-PaymentSaga
+      DefinitionUri: state-machine/payment-saga.asl.json
+      DefinitionSubstitutions:
+        InvoiceProcessorArn: !GetAtt InvoiceProcessorFunction.Arn
+        WalletServiceArn: !GetAtt WalletServiceFunction.Arn
+        PaymentsAdapterArn: !GetAtt PaymentsAdapterFunction.Arn
+        RefundServiceArn: !GetAtt RefundServiceFunction.Arn
+      Policies:
+        - LambdaInvokePolicy:
+            FunctionName: !Ref InvoiceProcessorFunction
+        - LambdaInvokePolicy:
+            FunctionName: !Ref WalletServiceFunction
+        - LambdaInvokePolicy:
+            FunctionName: !Ref PaymentsAdapterFunction
+        - LambdaInvokePolicy:
+            FunctionName: !Ref RefundServiceFunction
+      Tracing:
+        Enabled: true
+
+  # API Gateway
+  PaymentApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      Name: !Sub ${Stage}-PaymentAPI
+      StageName: !Ref Stage
+      TracingEnabled: true
+      Cors:
+        AllowMethods: "'*'"
+        AllowHeaders: "'*'"
+        AllowOrigin: "'*'"
+
+  PaymentApiFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${Stage}-api-handler
+      Runtime: go1.x
+      CodeUri: lambdas/api-handler/
+      Handler: bootstrap
+      Environment:
+        Variables:
+          STATE_MACHINE_ARN: !Ref PaymentSagaStateMachine
+      Events:
+        CreatePayment:
+          Type: Api
+          Properties:
+            RestApiId: !Ref PaymentApi
+            Path: /payments
+            Method: POST
+        GetPayment:
+          Type: Api
+          Properties:
+            RestApiId: !Ref PaymentApi
+            Path: /payments/{paymentId}
+            Method: GET
+      Policies:
+        - StepFunctionsExecutionPolicy:
+            StateMachineName: !GetAtt PaymentSagaStateMachine.Name
+
+Outputs:
+  ApiEndpoint:
+    Description: API Gateway endpoint URL
+    Value: !Sub https://${PaymentApi}.execute-api.${AWS::Region}.amazonaws.com/${Stage}
+  
+  StateMachineArn:
+    Description: Step Functions State Machine ARN
+    Value: !Ref PaymentSagaStateMachine
